@@ -13,7 +13,7 @@ import {
   userRole,
 } from '@/lib/db/schema'
 import { headers } from 'next/headers'
-import { and, eq, desc, asc, gte, lte, or } from 'drizzle-orm'
+import { and, eq, desc, asc, gte, lte, or, aliasedTable } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import {
   checkReservationConflicts,
@@ -118,6 +118,24 @@ export async function createReservation(data: {
         })
       }
     }
+
+    // Alert all approvers that this request collides with existing bookings
+    const approvers = await db
+      .select({ userId: userRole.userId })
+      .from(userRole)
+      .where(or(eq(userRole.role, 'APPROVER'), eq(userRole.role, 'ADMIN')))
+
+    const uniqueApproverIds = [...new Set(approvers.map((a) => a.userId))]
+    for (const approverId of uniqueApproverIds) {
+      await db.insert(notification).values({
+        id: randomUUID(),
+        userId: approverId,
+        reservationId,
+        type: 'CONFLICT_DETECTED',
+        title: 'Booking Conflict Needs Review',
+        message: `Request ${requestNumber} conflicts with ${conflictCheck.conflictingReservations.length} existing reservation(s) for the same equipment and overlapping time. Please review before approving.`,
+      })
+    }
   }
 
   // Create audit log
@@ -187,13 +205,13 @@ export async function getPendingApprovals() {
 
   // Check if user is an approver
   const roles = await getUserRoles()
-  const isApprover = roles.some((r) => r.role === 'APPROVER')
+  const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
 
   if (!isApprover) {
     throw new Error('User is not an approver')
   }
 
-  return db
+  const pending = await db
     .select({
       id: reservation.id,
       requestNumber: reservation.requestNumber,
@@ -214,6 +232,48 @@ export async function getPendingApprovals() {
     .innerJoin(user, eq(reservation.requestorId, user.id))
     .where(eq(reservation.status, 'PENDING'))
     .orderBy(asc(reservation.createdAt))
+
+  // Attach conflict details so approvers are alerted when the same
+  // equipment is requested for overlapping time windows by multiple users.
+  const withConflicts = await Promise.all(
+    pending.map(async (p) => {
+      const conflicts = await getReservationConflicts(p.id)
+      return { ...p, conflicts }
+    })
+  )
+
+  return withConflicts
+}
+
+/**
+ * Get the list of conflicting reservations for a given reservation.
+ * Returns details about who else booked the same equipment for an
+ * overlapping time window, along with the type of overlap.
+ */
+export async function getReservationConflicts(reservationId: string) {
+  const conflictingRes = aliasedTable(reservation, 'conflicting_res')
+
+  return db
+    .select({
+      conflictId: reservationConflict.id,
+      overlapType: reservationConflict.overlapType,
+      detectedAt: reservationConflict.detectedAt,
+      reservationId: conflictingRes.id,
+      requestNumber: conflictingRes.requestNumber,
+      status: conflictingRes.status,
+      startDate: conflictingRes.startDate,
+      endDate: conflictingRes.endDate,
+      requestorName: user.name,
+      requestorEmail: user.email,
+    })
+    .from(reservationConflict)
+    .innerJoin(
+      conflictingRes,
+      eq(reservationConflict.conflictingReservationId, conflictingRes.id)
+    )
+    .innerJoin(user, eq(conflictingRes.requestorId, user.id))
+    .where(eq(reservationConflict.reservationId, reservationId))
+    .orderBy(asc(conflictingRes.startDate))
 }
 
 /**
@@ -227,7 +287,7 @@ export async function approveReservation(
 
   // Verify user is an approver
   const roles = await getUserRoles()
-  const isApprover = roles.some((r) => r.role === 'APPROVER')
+  const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
   if (!isApprover) {
     throw new Error('User is not an approver')
   }
@@ -293,7 +353,7 @@ export async function rejectReservation(
 
   // Verify user is an approver
   const roles = await getUserRoles()
-  const isApprover = roles.some((r) => r.role === 'APPROVER')
+  const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
   if (!isApprover) {
     throw new Error('User is not an approver')
   }
