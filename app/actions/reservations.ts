@@ -13,7 +13,7 @@ import {
   userRole,
 } from '@/lib/db/schema'
 import { headers } from 'next/headers'
-import { and, eq, desc, asc, gte, lte, or, sql } from 'drizzle-orm'
+import { and, eq, desc, asc, gte, lte, or, aliasedTable } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import {
   checkReservationConflicts,
@@ -241,144 +241,82 @@ export async function getUserReservations() {
 }
 
 /**
- * Get pending reservations for approvers, with live-computed overlap conflicts.
- * Conflicts are computed directly from the pending list (not from the
- * reservation_conflict table, which can have stale/deleted rows).
+ * Get pending reservations for approvers
  */
 export async function getPendingApprovals() {
-  // Check if user is an approver / admin
+  const userId = await getUserId()
+
+  // Check if user is an approver
   const roles = await getUserRoles()
   const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
-  if (!isApprover) throw new Error('User is not an approver')
 
-  // Fetch all pending reservations with enriched info using raw SQL
-  // so camelCase column names are properly quoted.
-  const result = await db.execute(sql`
-    SELECT
-      r.id,
-      r."requestNumber",
-      r."equipmentId",
-      e.name   AS "equipmentName",
-      e.type   AS "equipmentType",
-      u.name   AS "requestorName",
-      u.email  AS "requestorEmail",
-      r.status,
-      r."startDate",
-      r."endDate",
-      r.purpose,
-      r."costCode",
-      r."createdAt"
-    FROM reservation r
-    JOIN equipment e ON e.id = r."equipmentId"
-    JOIN "user"    u ON u.id = r."requestorId"
-    WHERE r.status = 'PENDING'
-    ORDER BY r."createdAt" ASC
-  `)
-
-  type PendingRow = {
-    id: string
-    requestNumber: string
-    equipmentId: string
-    equipmentName: string
-    equipmentType: string
-    requestorName: string | null
-    requestorEmail: string | null
-    status: string
-    startDate: Date
-    endDate: Date
-    purpose: string
-    costCode: string | null
-    createdAt: Date
+  if (!isApprover) {
+    throw new Error('User is not an approver')
   }
 
-  const pending = result.rows as PendingRow[]
+  const pending = await db
+    .select({
+      id: reservation.id,
+      requestNumber: reservation.requestNumber,
+      equipmentId: reservation.equipmentId,
+      equipmentName: equipment.name,
+      equipmentType: equipment.type,
+      requestorName: user.name,
+      requestorEmail: user.email,
+      status: reservation.status,
+      startDate: reservation.startDate,
+      endDate: reservation.endDate,
+      purpose: reservation.purpose,
+      costCode: reservation.costCode,
+      createdAt: reservation.createdAt,
+    })
+    .from(reservation)
+    .innerJoin(equipment, eq(reservation.equipmentId, equipment.id))
+    .innerJoin(user, eq(reservation.requestorId, user.id))
+    .where(eq(reservation.status, 'PENDING'))
+    .orderBy(asc(reservation.createdAt))
 
-  // Compute conflicts live: for each pending request find all OTHER pending
-  // requests for the same equipment whose date window overlaps.
-  function datesOverlapLocal(
-    aStart: Date, aEnd: Date,
-    bStart: Date, bEnd: Date
-  ): boolean {
-    return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart)
-  }
-
-  function getOverlapTypeLocal(
-    aStart: Date, aEnd: Date,
-    bStart: Date, bEnd: Date
-  ): 'FULL_OVERLAP' | 'PARTIAL_OVERLAP' | 'ADJACENT' {
-    const as = new Date(aStart).getTime()
-    const ae = new Date(aEnd).getTime()
-    const bs = new Date(bStart).getTime()
-    const be = new Date(bEnd).getTime()
-    // Check adjacency first (within 1 minute)
-    if (Math.abs(ae - bs) < 60_000 || Math.abs(be - as) < 60_000) return 'ADJACENT'
-    // Full overlap: one window completely contains the other
-    if ((as <= bs && ae >= be) || (bs <= as && be >= ae)) return 'FULL_OVERLAP'
-    return 'PARTIAL_OVERLAP'
-  }
-
-  const withConflicts = pending.map((p) => {
-    const conflicts = pending
-      .filter((other) => {
-        if (other.id === p.id) return false
-        if (other.equipmentId !== p.equipmentId) return false
-        return datesOverlapLocal(p.startDate, p.endDate, other.startDate, other.endDate)
-      })
-      .map((other) => ({
-        conflictId: `live-${p.id}-${other.id}`,
-        overlapType: getOverlapTypeLocal(p.startDate, p.endDate, other.startDate, other.endDate),
-        reservationId: other.id,
-        requestNumber: other.requestNumber,
-        status: other.status,
-        startDate: other.startDate,
-        endDate: other.endDate,
-        requestorName: other.requestorName,
-        requestorEmail: other.requestorEmail,
-      }))
-
-    return { ...p, conflicts }
-  })
+  // Attach conflict details so approvers are alerted when the same
+  // equipment is requested for overlapping time windows by multiple users.
+  const withConflicts = await Promise.all(
+    pending.map(async (p) => {
+      const conflicts = await getReservationConflicts(p.id)
+      return { ...p, conflicts }
+    })
+  )
 
   return withConflicts
 }
 
 /**
  * Get the list of conflicting reservations for a given reservation.
- * Uses raw SQL with quoted camelCase identifiers to avoid PostgreSQL
- * lowercasing the column names at query time.
+ * Returns details about who else booked the same equipment for an
+ * overlapping time window, along with the type of overlap.
  */
 export async function getReservationConflicts(reservationId: string) {
-  const rows = await db.execute(sql`
-    SELECT
-      rc.id                          AS "conflictId",
-      rc."overlapType",
-      rc."detectedAt",
-      cr.id                          AS "reservationId",
-      cr."requestNumber",
-      cr.status,
-      cr."startDate",
-      cr."endDate",
-      u.name                         AS "requestorName",
-      u.email                        AS "requestorEmail"
-    FROM reservation_conflict rc
-    JOIN reservation cr ON cr.id = rc."conflictingReservationId"
-    JOIN "user" u        ON u.id  = cr."requestorId"
-    WHERE rc."reservationId" = ${reservationId}
-    ORDER BY cr."startDate" ASC
-  `)
+  const conflictingRes = aliasedTable(reservation, 'conflicting_res')
 
-  return rows.rows as Array<{
-    conflictId: string
-    overlapType: 'FULL_OVERLAP' | 'PARTIAL_OVERLAP' | 'ADJACENT'
-    detectedAt: Date
-    reservationId: string
-    requestNumber: string
-    status: string
-    startDate: Date
-    endDate: Date
-    requestorName: string | null
-    requestorEmail: string | null
-  }>
+  return db
+    .select({
+      conflictId: reservationConflict.id,
+      overlapType: reservationConflict.overlapType,
+      detectedAt: reservationConflict.detectedAt,
+      reservationId: conflictingRes.id,
+      requestNumber: conflictingRes.requestNumber,
+      status: conflictingRes.status,
+      startDate: conflictingRes.startDate,
+      endDate: conflictingRes.endDate,
+      requestorName: user.name,
+      requestorEmail: user.email,
+    })
+    .from(reservationConflict)
+    .innerJoin(
+      conflictingRes,
+      eq(reservationConflict.conflictingReservationId, conflictingRes.id)
+    )
+    .innerJoin(user, eq(conflictingRes.requestorId, user.id))
+    .where(eq(reservationConflict.reservationId, reservationId))
+    .orderBy(asc(conflictingRes.startDate))
 }
 
 /**
