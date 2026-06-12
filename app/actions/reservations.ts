@@ -241,7 +241,9 @@ export async function getUserReservations() {
 }
 
 /**
- * Get pending reservations for approvers
+ * Get pending reservations for approvers, with live-computed overlap conflicts.
+ * Conflicts are computed directly from the pending list (not from the
+ * reservation_conflict table, which can have stale/deleted rows).
  */
 export async function getPendingApprovals() {
   // Check if user is an approver / admin
@@ -249,7 +251,8 @@ export async function getPendingApprovals() {
   const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
   if (!isApprover) throw new Error('User is not an approver')
 
-  // Raw SQL so all camelCase column names are properly quoted.
+  // Fetch all pending reservations with enriched info using raw SQL
+  // so camelCase column names are properly quoted.
   const result = await db.execute(sql`
     SELECT
       r.id,
@@ -272,7 +275,7 @@ export async function getPendingApprovals() {
     ORDER BY r."createdAt" ASC
   `)
 
-  const pending = result.rows as Array<{
+  type PendingRow = {
     id: string
     requestNumber: string
     equipmentId: string
@@ -286,15 +289,55 @@ export async function getPendingApprovals() {
     purpose: string
     costCode: string | null
     createdAt: Date
-  }>
+  }
 
-  // Attach conflict details to each pending request.
-  const withConflicts = await Promise.all(
-    pending.map(async (p) => {
-      const conflicts = await getReservationConflicts(p.id)
-      return { ...p, conflicts }
-    })
-  )
+  const pending = result.rows as PendingRow[]
+
+  // Compute conflicts live: for each pending request find all OTHER pending
+  // requests for the same equipment whose date window overlaps.
+  function datesOverlapLocal(
+    aStart: Date, aEnd: Date,
+    bStart: Date, bEnd: Date
+  ): boolean {
+    return new Date(aStart) < new Date(bEnd) && new Date(aEnd) > new Date(bStart)
+  }
+
+  function getOverlapTypeLocal(
+    aStart: Date, aEnd: Date,
+    bStart: Date, bEnd: Date
+  ): 'FULL_OVERLAP' | 'PARTIAL_OVERLAP' | 'ADJACENT' {
+    const as = new Date(aStart).getTime()
+    const ae = new Date(aEnd).getTime()
+    const bs = new Date(bStart).getTime()
+    const be = new Date(bEnd).getTime()
+    // Check adjacency first (within 1 minute)
+    if (Math.abs(ae - bs) < 60_000 || Math.abs(be - as) < 60_000) return 'ADJACENT'
+    // Full overlap: one window completely contains the other
+    if ((as <= bs && ae >= be) || (bs <= as && be >= ae)) return 'FULL_OVERLAP'
+    return 'PARTIAL_OVERLAP'
+  }
+
+  const withConflicts = pending.map((p) => {
+    const conflicts = pending
+      .filter((other) => {
+        if (other.id === p.id) return false
+        if (other.equipmentId !== p.equipmentId) return false
+        return datesOverlapLocal(p.startDate, p.endDate, other.startDate, other.endDate)
+      })
+      .map((other) => ({
+        conflictId: `live-${p.id}-${other.id}`,
+        overlapType: getOverlapTypeLocal(p.startDate, p.endDate, other.startDate, other.endDate),
+        reservationId: other.id,
+        requestNumber: other.requestNumber,
+        status: other.status,
+        startDate: other.startDate,
+        endDate: other.endDate,
+        requestorName: other.requestorName,
+        requestorEmail: other.requestorEmail,
+      }))
+
+    return { ...p, conflicts }
+  })
 
   return withConflicts
 }
