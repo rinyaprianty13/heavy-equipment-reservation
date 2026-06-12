@@ -13,7 +13,7 @@ import {
   userRole,
 } from '@/lib/db/schema'
 import { headers } from 'next/headers'
-import { and, eq, desc, asc, gte, lte, or, aliasedTable } from 'drizzle-orm'
+import { and, eq, desc, asc, gte, lte, or, sql } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import {
   checkReservationConflicts,
@@ -244,40 +244,51 @@ export async function getUserReservations() {
  * Get pending reservations for approvers
  */
 export async function getPendingApprovals() {
-  const userId = await getUserId()
-
-  // Check if user is an approver
+  // Check if user is an approver / admin
   const roles = await getUserRoles()
   const isApprover = roles.some((r) => r.role === 'APPROVER' || r.role === 'ADMIN')
+  if (!isApprover) throw new Error('User is not an approver')
 
-  if (!isApprover) {
-    throw new Error('User is not an approver')
-  }
+  // Raw SQL so all camelCase column names are properly quoted.
+  const result = await db.execute(sql`
+    SELECT
+      r.id,
+      r."requestNumber",
+      r."equipmentId",
+      e.name   AS "equipmentName",
+      e.type   AS "equipmentType",
+      u.name   AS "requestorName",
+      u.email  AS "requestorEmail",
+      r.status,
+      r."startDate",
+      r."endDate",
+      r.purpose,
+      r."costCode",
+      r."createdAt"
+    FROM reservation r
+    JOIN equipment e ON e.id = r."equipmentId"
+    JOIN "user"    u ON u.id = r."requestorId"
+    WHERE r.status = 'PENDING'
+    ORDER BY r."createdAt" ASC
+  `)
 
-  const pending = await db
-    .select({
-      id: reservation.id,
-      requestNumber: reservation.requestNumber,
-      equipmentId: reservation.equipmentId,
-      equipmentName: equipment.name,
-      equipmentType: equipment.type,
-      requestorName: user.name,
-      requestorEmail: user.email,
-      status: reservation.status,
-      startDate: reservation.startDate,
-      endDate: reservation.endDate,
-      purpose: reservation.purpose,
-      costCode: reservation.costCode,
-      createdAt: reservation.createdAt,
-    })
-    .from(reservation)
-    .innerJoin(equipment, eq(reservation.equipmentId, equipment.id))
-    .innerJoin(user, eq(reservation.requestorId, user.id))
-    .where(eq(reservation.status, 'PENDING'))
-    .orderBy(asc(reservation.createdAt))
+  const pending = result.rows as Array<{
+    id: string
+    requestNumber: string
+    equipmentId: string
+    equipmentName: string
+    equipmentType: string
+    requestorName: string | null
+    requestorEmail: string | null
+    status: string
+    startDate: Date
+    endDate: Date
+    purpose: string
+    costCode: string | null
+    createdAt: Date
+  }>
 
-  // Attach conflict details so approvers are alerted when the same
-  // equipment is requested for overlapping time windows by multiple users.
+  // Attach conflict details to each pending request.
   const withConflicts = await Promise.all(
     pending.map(async (p) => {
       const conflicts = await getReservationConflicts(p.id)
@@ -290,33 +301,41 @@ export async function getPendingApprovals() {
 
 /**
  * Get the list of conflicting reservations for a given reservation.
- * Returns details about who else booked the same equipment for an
- * overlapping time window, along with the type of overlap.
+ * Uses raw SQL with quoted camelCase identifiers to avoid PostgreSQL
+ * lowercasing the column names at query time.
  */
 export async function getReservationConflicts(reservationId: string) {
-  const conflictingRes = aliasedTable(reservation, 'conflicting_res')
+  const rows = await db.execute(sql`
+    SELECT
+      rc.id                          AS "conflictId",
+      rc."overlapType",
+      rc."detectedAt",
+      cr.id                          AS "reservationId",
+      cr."requestNumber",
+      cr.status,
+      cr."startDate",
+      cr."endDate",
+      u.name                         AS "requestorName",
+      u.email                        AS "requestorEmail"
+    FROM reservation_conflict rc
+    JOIN reservation cr ON cr.id = rc."conflictingReservationId"
+    JOIN "user" u        ON u.id  = cr."requestorId"
+    WHERE rc."reservationId" = ${reservationId}
+    ORDER BY cr."startDate" ASC
+  `)
 
-  return db
-    .select({
-      conflictId: reservationConflict.id,
-      overlapType: reservationConflict.overlapType,
-      detectedAt: reservationConflict.detectedAt,
-      reservationId: conflictingRes.id,
-      requestNumber: conflictingRes.requestNumber,
-      status: conflictingRes.status,
-      startDate: conflictingRes.startDate,
-      endDate: conflictingRes.endDate,
-      requestorName: user.name,
-      requestorEmail: user.email,
-    })
-    .from(reservationConflict)
-    .innerJoin(
-      conflictingRes,
-      eq(reservationConflict.conflictingReservationId, conflictingRes.id)
-    )
-    .innerJoin(user, eq(conflictingRes.requestorId, user.id))
-    .where(eq(reservationConflict.reservationId, reservationId))
-    .orderBy(asc(conflictingRes.startDate))
+  return rows.rows as Array<{
+    conflictId: string
+    overlapType: 'FULL_OVERLAP' | 'PARTIAL_OVERLAP' | 'ADJACENT'
+    detectedAt: Date
+    reservationId: string
+    requestNumber: string
+    status: string
+    startDate: Date
+    endDate: Date
+    requestorName: string | null
+    requestorEmail: string | null
+  }>
 }
 
 /**
