@@ -128,3 +128,42 @@
     @apply font-sans;
   }
 }
+
+/* Conflict severity styles — kept as static CSS so Tailwind never purges them.
+   Applied via data-severity attribute on the card/panel elements. */
+[data-severity="critical"] {
+  border-color: rgb(252 165 165) !important; /* red-300 */
+  background-color: rgb(254 226 226 / 0.25) !important; /* red-100/25 */
+}
+[data-severity="warning"] {
+  border-color: rgb(252 211 77) !important; /* amber-300 */
+  background-color: rgb(254 243 199 / 0.25) !important; /* amber-100/25 */
+}
+[data-severity="minor"] {
+  border-color: rgb(147 197 253) !important; /* blue-300 */
+  background-color: rgb(219 234 254 / 0.25) !important; /* blue-100/25 */
+}
+[data-severity="critical"] .conflict-panel {
+  border-color: rgb(252 165 165) !important;
+  background-color: rgb(254 226 226 / 0.15) !important;
+}
+[data-severity="warning"] .conflict-panel {
+  border-color: rgb(252 211 77) !important;
+  background-color: rgb(254 243 199 / 0.15) !important;
+}
+[data-severity="minor"] .conflict-panel {
+  border-color: rgb(147 197 253) !important;
+  background-color: rgb(219 234 254 / 0.15) !important;
+}
+.badge-critical {
+  background-color: rgb(220 38 38) !important; /* red-600 */
+  color: white !important;
+}
+.badge-warning {
+  background-color: rgb(245 158 11) !important; /* amber-500 */
+  color: white !important;
+}
+.badge-minor {
+  background-color: rgb(59 130 246) !important; /* blue-500 */
+  color: white !important;
+}
