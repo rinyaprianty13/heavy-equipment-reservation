@@ -152,12 +152,26 @@ export default function ReservationForm() {
         </Alert>
       )}
 
-      {success && (
+      {success && !success.hasConflict && (
         <Alert className="border-green-200 bg-green-50">
           <CheckCircle className="h-4 w-4 text-green-600" />
           <AlertDescription className="text-green-800">
-            Request {success.requestNumber} submitted successfully.
-            {success.hasConflict && ' Conflicts detected - alternative equipment suggestions provided.'}
+            Request {success.requestNumber} submitted successfully and sent for approval.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {success && success.hasConflict && (
+        <Alert className="border-amber-300 bg-amber-50">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-900">
+            <span className="font-semibold">
+              Request {success.requestNumber} submitted with a booking conflict.
+            </span>{' '}
+            This equipment is already reserved for {success.conflictCount} overlapping
+            time {success.conflictCount > 1 ? 'windows' : 'window'}. Your request was
+            still sent to an approver, who will decide which booking gets the
+            equipment. See the conflicting bookings and available alternatives below.
           </AlertDescription>
         </Alert>
       )}
@@ -288,26 +302,55 @@ export default function ReservationForm() {
         </CardContent>
       </Card>
 
-      {success && success.alternatives && success.alternatives.length > 0 && (
-        <Card>
+      {success && success.hasConflict && success.conflictingBookings?.length > 0 && (
+        <Card className="border-amber-300">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-amber-600">
+            <CardTitle className="flex items-center gap-2 text-amber-700">
               <AlertTriangle className="h-5 w-5" />
-              Alternative Equipment Available
+              Conflicting Bookings
             </CardTitle>
             <CardDescription>
-              Your requested equipment has a conflict, but these alternatives are available
+              Your requested equipment is already booked for these overlapping times
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {success.conflictingBookings.map((booking: any) => (
+                <div key={booking.requestNumber} className="p-4 border border-amber-200 rounded-lg bg-amber-50">
+                  <p className="font-mono font-semibold text-sm text-amber-900">
+                    {booking.requestNumber}
+                  </p>
+                  <p className="text-sm text-amber-800">
+                    {new Date(booking.startDate).toLocaleString()} to{' '}
+                    {new Date(booking.endDate).toLocaleString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {success && success.alternatives && success.alternatives.length > 0 && (
+        <Card className="border-green-200">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-green-700">
+              <CheckCircle className="h-5 w-5" />
+              Available Alternatives
+            </CardTitle>
+            <CardDescription>
+              These equivalent units are free for your requested time and could be used instead
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
               {success.alternatives.map((alt: any) => (
-                <div key={alt.id} className="p-4 border rounded-lg bg-amber-50">
-                  <p className="font-semibold text-sm">
-                    {alt.suggestedEquipmentName || 'Equipment'}
+                <div key={alt.id} className="p-4 border border-green-200 rounded-lg bg-green-50">
+                  <p className="font-semibold text-sm text-green-900">
+                    {alt.equipmentName} <span className="font-mono text-green-700">({alt.equipmentCode})</span>
                   </p>
-                  <p className="text-sm text-muted-foreground">
-                    Available: {new Date(alt.availableStartDate).toLocaleDateString()} to{' '}
+                  <p className="text-sm text-green-800">
+                    {alt.site} · Available {new Date(alt.availableStartDate).toLocaleDateString()} to{' '}
                     {new Date(alt.availableEndDate).toLocaleDateString()}
                   </p>
                 </div>

@@ -161,13 +161,56 @@ export async function createReservation(data: {
 
   revalidatePath('/dashboard')
 
+  // Build an enriched list of alternative equipment (with real names/codes)
+  // and a summary of the conflicting bookings so the requestor sees exactly
+  // what overlapped and what they can use instead.
+  let enrichedAlternatives: Array<{
+    id: string
+    equipmentName: string
+    equipmentCode: string
+    site: string
+    availableStartDate: Date
+    availableEndDate: Date
+  }> = []
+
+  let conflictingBookings: Array<{
+    requestNumber: string
+    startDate: Date
+    endDate: Date
+  }> = []
+
+  if (conflictCheck.hasConflict) {
+    enrichedAlternatives = await db
+      .select({
+        id: alternativeEquipment.id,
+        equipmentName: equipment.name,
+        equipmentCode: equipment.code,
+        site: equipment.site,
+        availableStartDate: alternativeEquipment.availableStartDate,
+        availableEndDate: alternativeEquipment.availableEndDate,
+      })
+      .from(alternativeEquipment)
+      .innerJoin(
+        equipment,
+        eq(alternativeEquipment.suggestedEquipmentId, equipment.id)
+      )
+      .where(eq(alternativeEquipment.originalReservationId, reservationId))
+
+    conflictingBookings = conflictCheck.conflictingReservations.map((r) => ({
+      requestNumber: r.requestNumber,
+      startDate: r.startDate,
+      endDate: r.endDate,
+    }))
+  }
+
   return {
     id: reservationId,
     requestNumber,
     hasConflict: conflictCheck.hasConflict,
-    alternatives: conflictCheck.hasConflict
-      ? await db.select().from(alternativeEquipment).where(eq(alternativeEquipment.originalReservationId, reservationId))
-      : [],
+    overlapType: conflictCheck.overlapType,
+    conflictCount: conflictCheck.conflictingReservations.length,
+    conflictingBookings,
+    alternatives: enrichedAlternatives,
   }
 }
 

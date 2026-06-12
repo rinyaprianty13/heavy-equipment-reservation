@@ -49,6 +49,63 @@ const overlapLabel: Record<string, string> = {
   ADJACENT: 'Back-to-back',
 }
 
+// Severity ranking + colors so approvers can instantly categorize conflicts.
+// FULL_OVERLAP = critical (red), PARTIAL_OVERLAP = warning (amber),
+// ADJACENT = minor (blue).
+type Severity = 'critical' | 'warning' | 'minor' | 'none'
+
+const overlapSeverity: Record<string, Severity> = {
+  FULL_OVERLAP: 'critical',
+  PARTIAL_OVERLAP: 'warning',
+  ADJACENT: 'minor',
+}
+
+const severityRank: Record<Severity, number> = {
+  critical: 3,
+  warning: 2,
+  minor: 1,
+  none: 0,
+}
+
+const severityStyles: Record<
+  Severity,
+  { card: string; badge: string; chip: string; label: string }
+> = {
+  critical: {
+    card: 'border-red-300 bg-red-50/60',
+    badge: 'bg-red-600 hover:bg-red-600 text-white',
+    chip: 'border-red-400 text-red-700',
+    label: 'Direct conflict',
+  },
+  warning: {
+    card: 'border-amber-300 bg-amber-50/60',
+    badge: 'bg-amber-500 hover:bg-amber-500 text-white',
+    chip: 'border-amber-400 text-amber-700',
+    label: 'Partial conflict',
+  },
+  minor: {
+    card: 'border-blue-300 bg-blue-50/60',
+    badge: 'bg-blue-500 hover:bg-blue-500 text-white',
+    chip: 'border-blue-400 text-blue-700',
+    label: 'Back-to-back',
+  },
+  none: {
+    card: '',
+    badge: '',
+    chip: '',
+    label: '',
+  },
+}
+
+function getTopSeverity(conflicts: ConflictDetail[]): Severity {
+  let top: Severity = 'none'
+  for (const c of conflicts) {
+    const s = overlapSeverity[c.overlapType] ?? 'warning'
+    if (severityRank[s] > severityRank[top]) top = s
+  }
+  return top
+}
+
 export default function ApprovalQueue() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
   const [loading, setLoading] = useState(true)
@@ -144,14 +201,36 @@ export default function ApprovalQueue() {
 
   return (
     <div className="space-y-4">
+      {approvals.some((a) => a.conflicts && a.conflicts.length > 0) && (
+        <Card className="bg-muted/40">
+          <CardContent className="py-3">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <span className="font-medium text-foreground">Conflict legend:</span>
+              <span className="flex items-center gap-2">
+                <span className="inline-block h-3 w-3 rounded-full bg-red-600" />
+                Direct conflict (full overlap)
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="inline-block h-3 w-3 rounded-full bg-amber-500" />
+                Partial conflict
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="inline-block h-3 w-3 rounded-full bg-blue-500" />
+                Back-to-back
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {approvals.map((approval) => {
         const hasConflict = approval.conflicts && approval.conflicts.length > 0
+        const severity = hasConflict ? getTopSeverity(approval.conflicts) : 'none'
+        const styles = severityStyles[severity]
         return (
         <Card
           key={approval.id}
-          className={`cursor-pointer hover:shadow-md transition ${
-            hasConflict ? 'border-amber-300 bg-amber-50/50' : ''
-          }`}
+          className={`cursor-pointer hover:shadow-md transition ${styles.card}`}
         >
           <CardHeader
             onClick={() =>
@@ -166,10 +245,12 @@ export default function ApprovalQueue() {
                   </CardTitle>
                   <Badge variant="outline">PENDING</Badge>
                   {hasConflict && (
-                    <Badge className="bg-amber-500 hover:bg-amber-500 text-white gap-1">
+                    <Badge className={`gap-1 ${styles.badge}`}>
                       <AlertTriangle className="h-3 w-3" />
-                      {approval.conflicts.length} Booking Conflict
-                      {approval.conflicts.length > 1 ? 's' : ''}
+                      {styles.label}
+                      {approval.conflicts.length > 1
+                        ? ` · ${approval.conflicts.length} overlaps`
+                        : ''}
                     </Badge>
                   )}
                 </div>
@@ -199,24 +280,29 @@ export default function ApprovalQueue() {
           {expandedId === approval.id && (
             <CardContent className="space-y-4 border-t pt-4">
               {hasConflict && (
-                <div className="rounded-md border border-amber-300 bg-amber-50 p-4">
+                <div className={`rounded-md border p-4 ${styles.card}`}>
                   <div className="flex items-center gap-2 mb-2">
-                    <AlertTriangle className="h-4 w-4 text-amber-600" />
-                    <p className="font-semibold text-amber-800">
-                      Scheduling conflict detected
+                    <AlertTriangle className="h-4 w-4 text-foreground" />
+                    <p className="font-semibold text-foreground">
+                      {approval.conflicts.length} competing reservation
+                      {approval.conflicts.length > 1 ? 's' : ''} for this equipment
                     </p>
                   </div>
-                  <p className="text-sm text-amber-800 mb-3">
-                    This equipment is also requested for an overlapping time by{' '}
-                    {approval.conflicts.length} other reservation
-                    {approval.conflicts.length > 1 ? 's' : ''}. Approving more than
-                    one for the same window will double-book the equipment.
+                  <p className="text-sm text-muted-foreground mb-3">
+                    This equipment is requested for an overlapping time by other
+                    requestors. Only one booking can use it — review the overlaps
+                    below and approve the request that should get the equipment,
+                    then reject the others.
                   </p>
                   <div className="space-y-2">
-                    {approval.conflicts.map((c) => (
+                    {approval.conflicts.map((c) => {
+                      const cSeverity =
+                        overlapSeverity[c.overlapType] ?? 'warning'
+                      const cStyles = severityStyles[cSeverity]
+                      return (
                       <div
                         key={c.conflictId}
-                        className="rounded bg-white/70 border border-amber-200 p-2 text-sm"
+                        className="rounded bg-background border p-2 text-sm"
                       >
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-mono font-medium text-foreground">
@@ -225,7 +311,9 @@ export default function ApprovalQueue() {
                           <Badge variant="outline" className="text-xs">
                             {c.status}
                           </Badge>
-                          <Badge variant="outline" className="text-xs border-amber-400 text-amber-700">
+                          <Badge
+                            className={`text-xs text-white ${cStyles.badge}`}
+                          >
                             {overlapLabel[c.overlapType] ?? c.overlapType}
                           </Badge>
                         </div>
@@ -235,7 +323,8 @@ export default function ApprovalQueue() {
                           {format(new Date(c.endDate), 'MMM dd, HH:mm')}
                         </p>
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               )}
