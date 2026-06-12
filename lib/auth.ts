@@ -9,7 +9,7 @@ export const auth = betterAuth({
       ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
       : process.env.VERCEL_URL
         ? `https://${process.env.VERCEL_URL}`
-        : process.env.V0_RUNTIME_URL),
+        : process.env.V0_RUNTIME_URL ?? 'http://localhost:3000'),
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,
@@ -18,7 +18,11 @@ export const auth = betterAuth({
     // Development origins
     'http://localhost:3000',
     'http://localhost:3001',
-    ...(process.env.V0_RUNTIME_URL ? [process.env.V0_RUNTIME_URL] : []),
+    ...(process.env.V0_RUNTIME_URL
+      ? [process.env.V0_RUNTIME_URL.startsWith('http')
+          ? process.env.V0_RUNTIME_URL
+          : `https://${process.env.V0_RUNTIME_URL}`]
+      : []),
     // Vercel preview and production
     ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
     ...(process.env.VERCEL_PROJECT_PRODUCTION_URL
